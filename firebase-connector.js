@@ -42,9 +42,7 @@ const corsOptions = {
 };
 // Apply CORS middleware
 app.use(cors(corsOptions));
-
 app.use(express.json());
-
 // ✅ DATABASE CONFIGURATION FOR RAILWAY
 const dbConfig = {
   host: process.env.MYSQLHOST || "localhost",
