@@ -233,7 +233,7 @@ async function parseTallyCustomers(xmlData) {
           mobileNumber = extractMobileNumber(mobileRaw);
         }
 
-        // 5️⃣ Extract STATE field
+        // 6️⃣ Extract STATE field
         let state = 'not_applicable'; // Default value
         if (ledger.STATE) {
           let stateRaw = '';
@@ -248,7 +248,7 @@ async function parseTallyCustomers(xmlData) {
           }
         }
 
-        // 6️⃣ Extract email
+        // 5️⃣ Extract email
         let email = null;
         if (ledger.EMAIL) {
           let emailRaw = '';
@@ -263,28 +263,50 @@ async function parseTallyCustomers(xmlData) {
           }
         }
 
-        // 7️⃣ ✅ EXTRACT CUSTOMER TYPE FROM UDF:PRODUCTCATEGORY AND CONVERT TO LOWERCASE
-        let customerType = 'direct'; // Default value (now lowercase)
-        
-        if (ledger.UDF_PRODUCTCATEGORY_LIST) {
-          console.log('🔍 Found UDF:PRODUCTCATEGORY.LIST structure:', JSON.stringify(ledger.UDF_PRODUCTCATEGORY_LIST, null, 2));
-          
-          // Handle different possible structures
-          if (ledger.UDF_PRODUCTCATEGORY_LIST.UDF_PRODUCTCATEGORY) {
-            let extractedType = '';
-            if (Array.isArray(ledger.UDF_PRODUCTCATEGORY_LIST.UDF_PRODUCTCATEGORY)) {
-              extractedType = String(ledger.UDF_PRODUCTCATEGORY_LIST.UDF_PRODUCTCATEGORY[0]).trim();
-            } else {
-              extractedType = String(ledger.UDF_PRODUCTCATEGORY_LIST.UDF_PRODUCTCATEGORY).trim();
-            }
-            
-            // Convert to lowercase and clean up
-            customerType = extractedType.toLowerCase().trim();
-            console.log(`🎯 Extracted customer type: ${extractedType} → ${customerType}`);
-          }
-        }
+        // 6️⃣ ✅ EXTRACT CUSTOMER TYPE FROM UDF:_UDF_788560154.LIST AND CONVERT TO LOWERCASE
+let customerType = 'direct'; // Default value (now lowercase)
 
-        // 8️⃣ Build final customer object with lowercase values
+// Look for UDF:_UDF_788560154.LIST structure
+if (ledger.UDF__UDF_788560154_LIST) {
+  console.log('🔍 Found UDF:_UDF_788560154.LIST structure:', JSON.stringify(ledger.UDF__UDF_788560154_LIST, null, 2));
+  
+  // Handle different possible structures
+  if (ledger.UDF__UDF_788560154_LIST.UDF__UDF_788560154) {
+    let extractedType = '';
+    if (Array.isArray(ledger.UDF__UDF_788560154_LIST.UDF__UDF_788560154)) {
+      extractedType = String(ledger.UDF__UDF_788560154_LIST.UDF__UDF_788560154[0]).trim();
+    } else {
+      extractedType = String(ledger.UDF__UDF_788560154_LIST.UDF__UDF_788560154).trim();
+    }
+    
+    // Convert to lowercase and clean up
+    if (extractedType) {
+      customerType = extractedType.toLowerCase().trim();
+      console.log(`🎯 Extracted customer type from _UDF_788560154: ${extractedType} → ${customerType}`);
+    }
+  }
+}
+
+// Alternative: Check for UDF:PRODUCTCATEGORY as fallback
+if (customerType === 'direct' && ledger.UDF_PRODUCTCATEGORY_LIST) {
+  console.log('🔍 Fallback to UDF:PRODUCTCATEGORY.LIST structure:', JSON.stringify(ledger.UDF_PRODUCTCATEGORY_LIST, null, 2));
+  
+  if (ledger.UDF_PRODUCTCATEGORY_LIST.UDF_PRODUCTCATEGORY) {
+    let extractedType = '';
+    if (Array.isArray(ledger.UDF_PRODUCTCATEGORY_LIST.UDF_PRODUCTCATEGORY)) {
+      extractedType = String(ledger.UDF_PRODUCTCATEGORY_LIST.UDF_PRODUCTCATEGORY[0]).trim();
+    } else {
+      extractedType = String(ledger.UDF_PRODUCTCATEGORY_LIST.UDF_PRODUCTCATEGORY).trim();
+    }
+    
+    if (extractedType) {
+      customerType = extractedType.toLowerCase().trim();
+      console.log(`🎯 Extracted customer type from PRODUCTCATEGORY: ${extractedType} → ${customerType}`);
+    }
+  }
+}
+
+        // 7️⃣ Build final customer object with lowercase values
         const customer = {
           customer_code: customerCode || null,
           customer_name: customerName,
@@ -758,16 +780,30 @@ async function parseTallyCustomersAlternative(xmlData) {
         }
       }
 
-      // ✅ EXTRACT CUSTOMER TYPE FROM UDF:PRODUCTCATEGORY AND CONVERT TO LOWERCASE
-      let customerType = 'direct'; // Default value (now lowercase)
-      
-      // Look for UDF:PRODUCTCATEGORY.LIST structure
-      const productCategoryMatch = ledgerXml.match(/<UDF:PRODUCTCATEGORY\.LIST[\s\S]*?<UDF:PRODUCTCATEGORY[^>]*>(.*?)<\/UDF:PRODUCTCATEGORY>/);
-      if (productCategoryMatch && productCategoryMatch[1]) {
-        const extractedType = productCategoryMatch[1].trim();
-        customerType = extractedType.toLowerCase().trim();
-        console.log(`🎯 Extracted customer type (alt): ${extractedType} → ${customerType}`);
-      }
+      // ✅ EXTRACT CUSTOMER TYPE FROM UDF:_UDF_788560154 AND CONVERT TO LOWERCASE
+let customerType = 'direct'; // Default value (now lowercase)
+
+// Look for UDF:_UDF_788560154.LIST structure (primary source)
+const udfPattern1 = ledgerXml.match(/<UDF:_UDF_788560154\.LIST[\s\S]*?<UDF:_UDF_788560154[^>]*>(.*?)<\/UDF:_UDF_788560154>/);
+if (udfPattern1 && udfPattern1[1]) {
+  const extractedType = udfPattern1[1].trim();
+  if (extractedType) {
+    customerType = extractedType.toLowerCase().trim();
+    console.log(`🎯 Extracted customer type (alt) from _UDF_788560154: ${extractedType} → ${customerType}`);
+  }
+}
+
+// Fallback to UDF:PRODUCTCATEGORY if not found in first pattern
+if (customerType === 'direct') {
+  const productCategoryMatch = ledgerXml.match(/<UDF:PRODUCTCATEGORY\.LIST[\s\S]*?<UDF:PRODUCTCATEGORY[^>]*>(.*?)<\/UDF:PRODUCTCATEGORY>/);
+  if (productCategoryMatch && productCategoryMatch[1]) {
+    const extractedType = productCategoryMatch[1].trim();
+    if (extractedType) {
+      customerType = extractedType.toLowerCase().trim();
+      console.log(`🎯 Extracted customer type (alt) from PRODUCTCATEGORY: ${extractedType} → ${customerType}`);
+    }
+  }
+}
 
       const customer = {
         customer_name: customerName,
@@ -863,7 +899,7 @@ async function saveCustomersToPostgreSQL(customers) {
   }
 }
 
-// 🧩 SAVE ITEMS TO POSTGRESQL - SKIP ITEMS WITH EMPTY/NULL ITEM_CODE
+// 🧩 SIMPLIFIED SAVE ITEMS TO POSTGRESQL - NO CONSTRAINT REQUIRED
 async function saveItemsToPostgreSQL(items) {
   if (items.length === 0) {
     console.log('ℹ️ No stock items to save');
@@ -888,11 +924,21 @@ async function saveItemsToPostgreSQL(items) {
 
   for (const item of validItems) {
     try {
+      // First check if item already exists
+      const checkSql = 'SELECT item_code FROM stock_item WHERE item_code = $1';
+      const checkResult = await pool.query(checkSql, [item.item_code]);
+      
+      if (checkResult.rows.length > 0) {
+        console.log(`⏭️ Skipped duplicate: ${item.stock_item_name} (Code: ${item.item_code})`);
+        duplicateCount++;
+        continue;
+      }
+      
+      // Insert new item
       const insertSql = `
         INSERT INTO stock_item 
         (item_code, stock_item_name, parent_group, uom, gst, hsn, rate)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (item_code) DO NOTHING
       `;
 
       const result = await pool.query(insertSql, [
@@ -908,16 +954,19 @@ async function saveItemsToPostgreSQL(items) {
       if (result.rowCount > 0) {
         console.log(`✅ Added: ${item.stock_item_name} (Code: ${item.item_code}, Rate: ${item.rate || 'N/A'})`);
         savedCount++;
-      } else {
-        console.log(`⏭️ Skipped duplicate: ${item.stock_item_name} (Code: ${item.item_code})`);
-        duplicateCount++;
       }
     } catch (error) {
-      console.error(
-        `❌ Error processing item ${item.stock_item_name}:`,
-        error.message
-      );
-      errorCount++;
+      // Check if it's a duplicate key error
+      if (error.code === '23505') { // unique_violation
+        console.log(`⏭️ Skipped duplicate (constraint violation): ${item.stock_item_name} (Code: ${item.item_code})`);
+        duplicateCount++;
+      } else {
+        console.error(
+          `❌ Error processing item ${item.stock_item_name}:`,
+          error.message
+        );
+        errorCount++;
+      }
     }
   }
 
