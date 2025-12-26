@@ -131,7 +131,7 @@ app.get("/me-admin", verifyToken, async (req, res) => {
 app.get("/me-distributor", verifyToken, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT customer_code, customer_name, role FROM customer WHERE firebase_uid = $1",
+      "SELECT customer_code, customer_name, role, state FROM customer WHERE firebase_uid = $1",
       [req.uid]
     );
     res.json(result.rows);
@@ -143,7 +143,7 @@ app.get("/me-distributor", verifyToken, async (req, res) => {
 app.get("/me-corporate", verifyToken, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT customer_code, customer_name, role FROM customer WHERE firebase_uid = $1",
+      "SELECT customer_code, customer_name, role, state FROM customer WHERE firebase_uid = $1",
       [req.uid]
     );
     res.json(result.rows);
@@ -582,6 +582,38 @@ app.get("/orders-by-number/:order_no", async (req, res) => {
   }
 });
 
+app.get('/api/orders/next-order-number', async (req, res) => {
+  try {
+    // Get the latest order number from database
+    const latestOrder = await Order.findOne({
+      order_no: { $regex: /^SQ-/ }
+    }).sort({ createdAt: -1 });
+    
+    let nextSequence = '0001';
+    const today = new Date();
+    const day = today.getDate().toString().padStart(2, '0');
+    const month = (today.getMonth() + 1).toString().padStart(2, '0');
+    const year = today.getFullYear().toString().slice(-2);
+    
+    if (latestOrder && latestOrder.order_no) {
+      const parts = latestOrder.order_no.split('-');
+      const lastDate = `${parts[1]}-${parts[2]}-${parts[3]}`;
+      const currentDate = `${day}-${month}-${year}`;
+      
+      if (lastDate === currentDate) {
+        const lastSequence = parseInt(parts[4]);
+        nextSequence = (lastSequence + 1).toString().padStart(4, '0');
+      }
+    }
+    
+    res.json({ 
+      orderNumber: `SQ-${day}-${month}-${year}-${nextSequence}` 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/orders', async (req, res) => {
   const data = req.body;
 
@@ -597,8 +629,8 @@ app.post('/orders', async (req, res) => {
     const insertPromises = data.map(item => {
       const insertSql = `
         INSERT INTO orders 
-        (voucher_type, order_no, order_date, status, customer_code, executive, role, customer_name, item_code, item_name, hsn, gst, delivery_date, delivery_mode, transporter_name, quantity, uom, rate, amount, net_rate, gross_amount, disc_percentage, disc_amount, spl_disc_percentage, spl_disc_amount, total_quantity, total_amount, remarks) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+        (voucher_type, order_no, order_date, status, customer_code, executive, role, customer_name, item_code, item_name, hsn, gst, sgst, cgst, igst, delivery_date, delivery_mode, transporter_name, quantity, uom, rate, amount, net_rate, gross_amount, disc_percentage, disc_amount, spl_disc_percentage, spl_disc_amount, total_quantity, total_cgst_amount, total_sgst_amount, total_igst_amount, total_amount, remarks) 
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)
         RETURNING id
       `;
       
@@ -615,6 +647,9 @@ app.post('/orders', async (req, res) => {
         item.item_name,
         item.hsn,
         String(item.gst).replace(/\s*%/, ''),
+        item.sgst,
+        item.cgst,
+        item.igst,
         item.delivery_date,
         item.delivery_mode,
         item.transporter_name,
@@ -629,6 +664,9 @@ app.post('/orders', async (req, res) => {
         item.spl_disc_percentage,
         item.spl_disc_amount,
         item.total_quantity ?? 0.00,
+        item.total_cgst_amount ?? 0.00,
+        item.total_sgst_amount ?? 0.00,
+        item.total_igst_amount ?? 0.00,
         item.total_amount ?? 0.00,
         item.remarks ?? '',
       ]);
