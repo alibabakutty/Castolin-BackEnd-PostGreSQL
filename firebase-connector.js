@@ -692,7 +692,7 @@ app.post('/orders', async (req, res) => {
 // ✅ Update specific fields of orders by order number (but match by ID)
 app.put("/orders-by-number/:order_no", async (req, res) => {
   const { order_no } = req.params;
-  const updates = req.body;
+  const updates = [...req.body].sort((a, b) => a.id - b.id);
 
   if (!order_no || order_no.trim() === "") {
     return res.status(400).json({ error: "Order Number is required" });
@@ -713,6 +713,7 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
       validationErrors.push(`Update ${index}: Valid numeric Order ID is required`);
     }
 
+    // Add GST fields to numeric validation
     const numericFields = [
       "disc_percentage",
       "disc_amount",
@@ -722,7 +723,14 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
       "gross_amount",
       "total_quantity",
       "total_amount",
-      "quantity"
+      "quantity",
+      "total_sgst_amount",     // Added
+      "total_cgst_amount",     // Added
+      "total_igst_amount",     // Added
+      "sgst",                  // Added for individual row GST if needed
+      "cgst",                  // Added for individual row GST if needed
+      "igst",                  // Added for individual row GST if needed
+      "gst"                    // Added for GST percentage
     ];
 
     numericFields.forEach((field) => {
@@ -730,6 +738,11 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
         validationErrors.push(`Update ${index}: ${field} must be a number`);
       }
     });
+
+    // Validate GST percentages (should be 0-100)
+    if (update.gst !== undefined && (update.gst < 0 || update.gst > 100)) {
+      validationErrors.push(`Update ${index}: gst must be between 0 and 100`);
+    }
   });
 
   if (validationErrors.length > 0) {
@@ -744,6 +757,7 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // Add GST fields to allowed fields
     const allowedFields = [
       "status",
       "disc_percentage",
@@ -758,7 +772,18 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
       "quantity",
       "delivery_date",
       "delivery_mode",
-      "transporter_name"
+      "transporter_name",
+      "total_sgst_amount",     // Added
+      "total_cgst_amount",     // Added
+      "total_igst_amount",     // Added
+      "sgst",                  // Added for individual row GST if needed
+      "cgst",                  // Added for individual row GST if needed
+      "igst",                  // Added for individual row GST if needed
+      "gst",                   // Added for GST percentage
+      "hsn",                   // Added for HSN code
+      "rate",                  // Added for rate
+      "amount",                // Added for amount
+      "uom"                    // Added for unit of measure
     ];
 
     for (const [index, update] of updates.entries()) {
@@ -785,6 +810,8 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
 
       const sql = `UPDATE orders SET ${setClause} WHERE id = $${values.length}`;
 
+      console.log(`Updating order item ${id}:`, filteredFields); // For debugging
+      
       const result = await client.query(sql, values);
       
       if (result.rowCount === 0) {
