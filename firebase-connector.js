@@ -702,6 +702,10 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
     return res.status(400).json({ error: "No update data provided" });
   }
 
+  // Debug: Log what we're receiving
+  console.log(`🔧 Processing update for order_no: ${order_no}`);
+  console.log(`📋 Updates count: ${updates.length}`);
+
   const validationErrors = [];
   updates.forEach((update, index) => {
     if (!update || typeof update !== "object") {
@@ -713,24 +717,11 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
       validationErrors.push(`Update ${index}: Valid numeric Order ID is required`);
     }
 
-    // Add GST fields to numeric validation
     const numericFields = [
-      "disc_percentage",
-      "disc_amount",
-      "spl_disc_percentage",
-      "spl_disc_amount",
-      "net_rate",
-      "gross_amount",
-      "total_quantity",
-      "total_amount",
-      "quantity",
-      "total_sgst_amount",     // Added
-      "total_cgst_amount",     // Added
-      "total_igst_amount",     // Added
-      "sgst",                  // Added for individual row GST if needed
-      "cgst",                  // Added for individual row GST if needed
-      "igst",                  // Added for individual row GST if needed
-      "gst"                    // Added for GST percentage
+      "disc_percentage", "disc_amount", "spl_disc_percentage", "spl_disc_amount",
+      "net_rate", "gross_amount", "total_quantity", "total_amount", "quantity",
+      "total_sgst_amount", "total_cgst_amount", "total_igst_amount",
+      "sgst", "cgst", "igst", "gst"
     ];
 
     numericFields.forEach((field) => {
@@ -739,7 +730,6 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
       }
     });
 
-    // Validate GST percentages (should be 0-100)
     if (update.gst !== undefined && (update.gst < 0 || update.gst > 100)) {
       validationErrors.push(`Update ${index}: gst must be between 0 and 100`);
     }
@@ -757,38 +747,35 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Add GST fields to allowed fields
+    // First, verify all IDs belong to the same order number
+    const orderIds = updates.map(u => u.id);
+    const verifySql = `
+      SELECT id, order_no 
+      FROM orders 
+      WHERE id = ANY($1::int[]) 
+      AND order_no = $2`;
+    
+    const verifyResult = await client.query(verifySql, [orderIds, order_no]);
+    
+    if (verifyResult.rows.length !== updates.length) {
+      throw new Error(`Some order IDs do not belong to order number ${order_no} or do not exist`);
+    }
+
+    console.log(`✅ Verified ${verifyResult.rows.length} records belong to order ${order_no}`);
+
     const allowedFields = [
-      "status",
-      "disc_percentage",
-      "disc_amount",
-      "spl_disc_percentage",
-      "spl_disc_amount",
-      "net_rate",
-      "gross_amount",
-      "total_quantity",
-      "total_amount",
-      "remarks",
-      "quantity",
-      "delivery_date",
-      "delivery_mode",
-      "transporter_name",
-      "total_sgst_amount",     // Added
-      "total_cgst_amount",     // Added
-      "total_igst_amount",     // Added
-      "sgst",                  // Added for individual row GST if needed
-      "cgst",                  // Added for individual row GST if needed
-      "igst",                  // Added for individual row GST if needed
-      "gst",                   // Added for GST percentage
-      "hsn",                   // Added for HSN code
-      "rate",                  // Added for rate
-      "amount",                // Added for amount
-      "uom"                    // Added for unit of measure
+      "status", "disc_percentage", "disc_amount", "spl_disc_percentage", 
+      "spl_disc_amount", "net_rate", "gross_amount", "total_quantity", 
+      "total_amount", "remarks", "quantity", "delivery_date", "delivery_mode",
+      "transporter_name", "total_sgst_amount", "total_cgst_amount", 
+      "total_igst_amount", "sgst", "cgst", "igst", "gst", "hsn", "rate", 
+      "amount", "uom"
     ];
 
     for (const [index, update] of updates.entries()) {
       const { id, ...fields } = update;
 
+      // Filter fields to only allowed ones
       const filteredFields = {};
       for (const key of Object.keys(fields)) {
         if (allowedFields.includes(key)) {
@@ -797,37 +784,61 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
       }
 
       if (Object.keys(filteredFields).length === 0) {
-        console.warn(`Skipping update ${index}: No valid fields`);
+        console.warn(`⚠️ Skipping update ${index} for ID ${id}: No valid fields`);
         continue;
       }
 
+      // Build dynamic SET clause
       const setClause = Object.keys(filteredFields)
         .map((field, idx) => `${field} = $${idx + 1}`)
         .join(", ");
 
       const values = Object.values(filteredFields);
+      // Add ID as the last parameter
       values.push(id);
+      // Add order_no as second condition for safety
+      values.push(order_no);
 
-      const sql = `UPDATE orders SET ${setClause} WHERE id = $${values.length}`;
+      // IMPORTANT: Update only where both ID matches AND order_no matches
+      const sql = `
+        UPDATE orders 
+        SET ${setClause} 
+        WHERE id = $${values.length - 1} 
+        AND order_no = $${values.length}`;
 
-      console.log(`Updating order item ${id}:`, filteredFields); // For debugging
+      console.log(`🔄 Updating order item ${id} in order ${order_no}:`);
+      console.log(`   SQL: ${sql}`);
+      console.log(`   Values:`, values);
       
       const result = await client.query(sql, values);
       
       if (result.rowCount === 0) {
-        throw new Error(`No record found for id ${id}`);
+        console.error(`❌ No record found for id ${id} in order ${order_no}`);
+        throw new Error(`No record found for id ${id} in order ${order_no}`);
       }
+      
+      console.log(`✅ Successfully updated order item ${id}`);
     }
 
     await client.query('COMMIT');
     
+    // Fetch updated records to return
+    const fetchUpdatedSql = `
+      SELECT * FROM orders 
+      WHERE order_no = $1 
+      ORDER BY id`;
+    
+    const updatedResult = await client.query(fetchUpdatedSql, [order_no]);
+    
     res.json({
       message: "Orders updated successfully",
       updatedCount: updates.length,
+      data: updatedResult.rows
     });
+    
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error("Transaction failed:", err.message);
+    console.error("❌ Transaction failed:", err.message);
     res.status(400).json({
       error: "Update failed",
       details: err.message,
