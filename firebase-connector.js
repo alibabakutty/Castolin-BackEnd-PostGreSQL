@@ -629,8 +629,8 @@ app.post('/orders', async (req, res) => {
     const insertPromises = data.map(item => {
       const insertSql = `
         INSERT INTO orders 
-        (voucher_type, order_no, order_date, status, customer_code, executive, role, customer_name, item_code, item_name, hsn, gst, sgst, cgst, igst, delivery_date, delivery_mode, transporter_name, quantity, uom, rate, amount, net_rate, gross_amount, disc_percentage, disc_amount, spl_disc_percentage, spl_disc_amount, total_quantity, total_cgst_amount, total_sgst_amount, total_igst_amount, total_amount, remarks) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)
+        (voucher_type, order_no, order_date, status, customer_code, executive, role, customer_name, item_code, item_name, hsn, gst, sgst, cgst, igst, delivery_date, delivery_mode, transporter_name, quantity, uom, rate, amount, net_rate, gross_amount, disc_percentage, disc_amount, spl_disc_percentage, spl_disc_amount, total_quantity, total_amount_without_tax, total_cgst_amount, total_sgst_amount, total_igst_amount, total_amount, remarks) 
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
         RETURNING id
       `;
       
@@ -664,6 +664,7 @@ app.post('/orders', async (req, res) => {
         item.spl_disc_percentage,
         item.spl_disc_amount,
         item.total_quantity ?? 0.00,
+        item.total_amount_without_tax ?? 0.00, // NEW: Add this
         item.total_cgst_amount ?? 0.00,
         item.total_sgst_amount ?? 0.00,
         item.total_igst_amount ?? 0.00,
@@ -689,7 +690,7 @@ app.post('/orders', async (req, res) => {
   }
 });
 
-// ✅ Update specific fields of orders by order number (but match by ID)
+// ✅ Update specific fields of orders by order number with deletion support
 app.put("/orders-by-number/:order_no", async (req, res) => {
   const { order_no } = req.params;
   const updates = [...req.body].sort((a, b) => a.id - b.id);
@@ -704,7 +705,14 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
 
   // Debug: Log what we're receiving
   console.log(`🔧 Processing update for order_no: ${order_no}`);
-  console.log(`📋 Updates count: ${updates.length}`);
+  console.log(`📋 Total items received: ${updates.length}`);
+  
+  // Separate updates and deletions
+  const itemsToUpdate = updates.filter(item => !item._deleted);
+  const itemsToDelete = updates.filter(item => item._deleted && item.id);
+  
+  console.log(`📝 Items to update: ${itemsToUpdate.length}`);
+  console.log(`🗑️ Items to delete: ${itemsToDelete.length}`);
 
   const validationErrors = [];
   updates.forEach((update, index) => {
@@ -713,15 +721,25 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
       return;
     }
 
+    // For deletions, only need id and _deleted flag
+    if (update._deleted) {
+      if (!update.id || isNaN(update.id)) {
+        validationErrors.push(`Delete ${index}: Valid numeric Order ID is required`);
+      }
+      return; // Skip further validation for deletions
+    }
+
+    // For updates, validate all required fields
     if (!update.id || isNaN(update.id)) {
       validationErrors.push(`Update ${index}: Valid numeric Order ID is required`);
     }
 
+    // Add total_amount_without_tax to numeric fields
     const numericFields = [
       "disc_percentage", "disc_amount", "spl_disc_percentage", "spl_disc_amount",
       "net_rate", "gross_amount", "total_quantity", "total_amount", "quantity",
       "total_sgst_amount", "total_cgst_amount", "total_igst_amount",
-      "sgst", "cgst", "igst", "gst"
+      "total_amount_without_tax", "sgst", "cgst", "igst", "gst"
     ];
 
     numericFields.forEach((field) => {
@@ -748,76 +766,93 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
     await client.query('BEGIN');
 
     // First, verify all IDs belong to the same order number
-    const orderIds = updates.map(u => u.id);
+    const allOrderIds = updates.map(u => u.id);
     const verifySql = `
       SELECT id, order_no 
       FROM orders 
       WHERE id = ANY($1::int[]) 
       AND order_no = $2`;
     
-    const verifyResult = await client.query(verifySql, [orderIds, order_no]);
+    const verifyResult = await client.query(verifySql, [allOrderIds, order_no]);
     
-    if (verifyResult.rows.length !== updates.length) {
+    if (verifyResult.rows.length !== allOrderIds.length) {
       throw new Error(`Some order IDs do not belong to order number ${order_no} or do not exist`);
     }
 
     console.log(`✅ Verified ${verifyResult.rows.length} records belong to order ${order_no}`);
 
-    const allowedFields = [
-      "status", "disc_percentage", "disc_amount", "spl_disc_percentage", 
-      "spl_disc_amount", "net_rate", "gross_amount", "total_quantity", 
-      "total_amount", "remarks", "quantity", "delivery_date", "delivery_mode",
-      "transporter_name", "total_sgst_amount", "total_cgst_amount", 
-      "total_igst_amount", "sgst", "cgst", "igst", "gst", "hsn", "rate", 
-      "amount", "uom"
-    ];
+    // Handle deletions first
+    if (itemsToDelete.length > 0) {
+      const deleteIds = itemsToDelete.map(item => item.id);
+      const deleteSql = `
+        DELETE FROM orders 
+        WHERE id = ANY($1::int[]) 
+        AND order_no = $2 
+        RETURNING id, item_name`;
+      
+      const deleteResult = await client.query(deleteSql, [deleteIds, order_no]);
+      console.log(`🗑️ Successfully deleted ${deleteResult.rows.length} items:`, 
+        deleteResult.rows.map(r => `${r.id} (${r.item_name})`));
+    }
 
-    for (const [index, update] of updates.entries()) {
-      const { id, ...fields } = update;
+    // Handle updates
+    if (itemsToUpdate.length > 0) {
+      // Add total_amount_without_tax to allowed fields
+      const allowedFields = [
+        "status", "disc_percentage", "disc_amount", "spl_disc_percentage", 
+        "spl_disc_amount", "net_rate", "gross_amount", "total_quantity", 
+        "total_amount", "total_amount_without_tax", "remarks", "quantity", 
+        "delivery_date", "delivery_mode", "transporter_name", 
+        "total_sgst_amount", "total_cgst_amount", "total_igst_amount", 
+        "sgst", "cgst", "igst", "gst", "hsn", "rate", "amount", "uom"
+      ];
 
-      // Filter fields to only allowed ones
-      const filteredFields = {};
-      for (const key of Object.keys(fields)) {
-        if (allowedFields.includes(key)) {
-          filteredFields[key] = fields[key];
+      for (const [index, update] of itemsToUpdate.entries()) {
+        const { id, _deleted, ...fields } = update; // Remove _deleted flag
+
+        // Filter fields to only allowed ones
+        const filteredFields = {};
+        for (const key of Object.keys(fields)) {
+          if (allowedFields.includes(key)) {
+            filteredFields[key] = fields[key];
+          }
         }
+
+        if (Object.keys(filteredFields).length === 0) {
+          console.warn(`⚠️ Skipping update ${index} for ID ${id}: No valid fields`);
+          continue;
+        }
+
+        // Build dynamic SET clause
+        const setClause = Object.keys(filteredFields)
+          .map((field, idx) => `${field} = $${idx + 1}`)
+          .join(", ");
+
+        const values = Object.values(filteredFields);
+        // Add ID as the last parameter
+        values.push(id);
+        // Add order_no as second condition for safety
+        values.push(order_no);
+
+        // IMPORTANT: Update only where both ID matches AND order_no matches
+        const sql = `
+          UPDATE orders 
+          SET ${setClause} 
+          WHERE id = $${values.length - 1} 
+          AND order_no = $${values.length}`;
+
+        console.log(`🔄 Updating order item ${id} in order ${order_no}:`);
+        console.log(`   SET Clause includes: ${Object.keys(filteredFields).join(', ')}`);
+        
+        const result = await client.query(sql, values);
+        
+        if (result.rowCount === 0) {
+          console.error(`❌ No record found for id ${id} in order ${order_no}`);
+          throw new Error(`No record found for id ${id} in order ${order_no}`);
+        }
+        
+        console.log(`✅ Successfully updated order item ${id}`);
       }
-
-      if (Object.keys(filteredFields).length === 0) {
-        console.warn(`⚠️ Skipping update ${index} for ID ${id}: No valid fields`);
-        continue;
-      }
-
-      // Build dynamic SET clause
-      const setClause = Object.keys(filteredFields)
-        .map((field, idx) => `${field} = $${idx + 1}`)
-        .join(", ");
-
-      const values = Object.values(filteredFields);
-      // Add ID as the last parameter
-      values.push(id);
-      // Add order_no as second condition for safety
-      values.push(order_no);
-
-      // IMPORTANT: Update only where both ID matches AND order_no matches
-      const sql = `
-        UPDATE orders 
-        SET ${setClause} 
-        WHERE id = $${values.length - 1} 
-        AND order_no = $${values.length}`;
-
-      console.log(`🔄 Updating order item ${id} in order ${order_no}:`);
-      console.log(`   SQL: ${sql}`);
-      console.log(`   Values:`, values);
-      
-      const result = await client.query(sql, values);
-      
-      if (result.rowCount === 0) {
-        console.error(`❌ No record found for id ${id} in order ${order_no}`);
-        throw new Error(`No record found for id ${id} in order ${order_no}`);
-      }
-      
-      console.log(`✅ Successfully updated order item ${id}`);
     }
 
     await client.query('COMMIT');
@@ -831,8 +866,9 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
     const updatedResult = await client.query(fetchUpdatedSql, [order_no]);
     
     res.json({
-      message: "Orders updated successfully",
-      updatedCount: updates.length,
+      message: "Orders processed successfully",
+      updatedCount: itemsToUpdate.length,
+      deletedCount: itemsToDelete.length,
       data: updatedResult.rows
     });
     
