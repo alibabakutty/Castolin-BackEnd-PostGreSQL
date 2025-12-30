@@ -690,100 +690,109 @@ app.post('/orders', async (req, res) => {
   }
 });
 
-// ✅ Update specific fields of orders by order number with deletion support
 app.put("/orders-by-number/:order_no", async (req, res) => {
   const { order_no } = req.params;
-  const updates = [...req.body].sort((a, b) => a.id - b.id);
+  const allItems = [...req.body].sort((a, b) => (a.id || 0) - (b.id || 0));
 
   if (!order_no || order_no.trim() === "") {
     return res.status(400).json({ error: "Order Number is required" });
   }
 
-  if (!Array.isArray(updates) || updates.length === 0) {
-    return res.status(400).json({ error: "No update data provided" });
+  if (!Array.isArray(allItems) || allItems.length === 0) {
+    return res.status(400).json({ error: "No data provided" });
   }
 
-  // Debug: Log what we're receiving
-  console.log(`🔧 Processing update for order_no: ${order_no}`);
-  console.log(`📋 Total items received: ${updates.length}`);
-  
-  // Separate updates and deletions
-  const itemsToUpdate = updates.filter(item => !item._deleted);
-  const itemsToDelete = updates.filter(item => item._deleted && item.id);
-  
+  console.log(`🔧 Processing order_no: ${order_no}`);
+  console.log(`📋 Total items received: ${allItems.length}`);
+
+  // Separate items based on presence of id
+  const itemsToInsert = allItems.filter(item => !item.id && !item._deleted); // New rows (no ID and not marked for deletion)
+  const itemsToUpdate = allItems.filter(item => item.id && !item._deleted); // Existing rows with an ID (not deleted)
+  const itemsToDelete = allItems.filter(item => item._deleted && item.id); // Existing rows marked for deletion
+
+  console.log(`➕ Items to insert: ${itemsToInsert.length}`);
   console.log(`📝 Items to update: ${itemsToUpdate.length}`);
   console.log(`🗑️ Items to delete: ${itemsToDelete.length}`);
-
-  const validationErrors = [];
-  updates.forEach((update, index) => {
-    if (!update || typeof update !== "object") {
-      validationErrors.push(`Update ${index}: Invalid update object`);
-      return;
-    }
-
-    // For deletions, only need id and _deleted flag
-    if (update._deleted) {
-      if (!update.id || isNaN(update.id)) {
-        validationErrors.push(`Delete ${index}: Valid numeric Order ID is required`);
-      }
-      return; // Skip further validation for deletions
-    }
-
-    // For updates, validate all required fields
-    if (!update.id || isNaN(update.id)) {
-      validationErrors.push(`Update ${index}: Valid numeric Order ID is required`);
-    }
-
-    // Add total_amount_without_tax to numeric fields
-    const numericFields = [
-      "disc_percentage", "disc_amount", "spl_disc_percentage", "spl_disc_amount",
-      "net_rate", "gross_amount", "total_quantity", "total_amount", "quantity",
-      "total_sgst_amount", "total_cgst_amount", "total_igst_amount",
-      "total_amount_without_tax", "sgst", "cgst", "igst", "gst"
-    ];
-
-    numericFields.forEach((field) => {
-      if (update[field] !== undefined && isNaN(update[field])) {
-        validationErrors.push(`Update ${index}: ${field} must be a number`);
-      }
-    });
-
-    if (update.gst !== undefined && (update.gst < 0 || update.gst > 100)) {
-      validationErrors.push(`Update ${index}: gst must be between 0 and 100`);
-    }
-  });
-
-  if (validationErrors.length > 0) {
-    return res.status(400).json({
-      error: "Validation failed",
-      details: validationErrors,
-    });
-  }
 
   const client = await pool.connect();
   
   try {
     await client.query('BEGIN');
 
-    // First, verify all IDs belong to the same order number
-    const allOrderIds = updates.map(u => u.id);
-    const verifySql = `
-      SELECT id, order_no 
-      FROM orders 
-      WHERE id = ANY($1::int[]) 
-      AND order_no = $2`;
+    // Check if order exists (optional, depending on your requirements)
+    const orderCheck = await client.query(
+      'SELECT COUNT(*) as count FROM orders WHERE order_no = $1',
+      [order_no]
+    );
     
-    const verifyResult = await client.query(verifySql, [allOrderIds, order_no]);
+    const orderExists = parseInt(orderCheck.rows[0].count) > 0;
     
-    if (verifyResult.rows.length !== allOrderIds.length) {
-      throw new Error(`Some order IDs do not belong to order number ${order_no} or do not exist`);
+    // If order doesn't exist and no items to insert, throw error
+    if (!orderExists && itemsToInsert.length === 0) {
+      throw new Error(`Order ${order_no} does not exist and no new items provided`);
     }
 
-    console.log(`✅ Verified ${verifyResult.rows.length} records belong to order ${order_no}`);
+    // Extract common order details with better logic
+    const defaultOrderDetails = {
+      voucher_type: 'Sales Order',
+      order_date: new Date().toISOString().split('T')[0],
+      customer_code: '',
+      customer_name: '',
+      executive: '',
+      role: '',
+      status: 'pending',
+      total_quantity: 0,
+      total_amount: 0,
+      total_amount_without_tax: 0,
+      total_sgst_amount: 0,
+      total_cgst_amount: 0,
+      total_igst_amount: 0,
+      remarks: '',
+    };
 
-    // Handle deletions first
+    // Find valid items to extract common details
+    const validItems = allItems.filter(item => !item._deleted);
+    let commonOrderDetails = { ...defaultOrderDetails };
+
+    if (validItems.length > 0) {
+      // Prioritize existing items (with IDs) for common details
+      const priorityItem = validItems.find(item => item.id) || validItems[0];
+      
+      // Extract only the fields that should be common across all items
+      const commonFields = [
+        'voucher_type', 'order_date', 'customer_code', 'customer_name',
+        'executive', 'role', 'status', 'total_quantity', 'total_amount',
+        'total_amount_without_tax', 'total_sgst_amount', 'total_cgst_amount',
+        'total_igst_amount', 'remarks'
+      ];
+      
+      commonFields.forEach(field => {
+        if (priorityItem[field] !== undefined) {
+          commonOrderDetails[field] = priorityItem[field];
+        }
+      });
+    }
+
+    // Handle deletions first (with validation)
     if (itemsToDelete.length > 0) {
       const deleteIds = itemsToDelete.map(item => item.id);
+      
+      // Verify all items to delete belong to this order
+      if (orderExists) {
+        const verifySql = `
+          SELECT id FROM orders 
+          WHERE id = ANY($1::int[]) 
+          AND order_no = $2`;
+        
+        const verifyResult = await client.query(verifySql, [deleteIds, order_no]);
+        
+        if (verifyResult.rows.length !== deleteIds.length) {
+          const foundIds = verifyResult.rows.map(r => r.id);
+          const missingIds = deleteIds.filter(id => !foundIds.includes(id));
+          throw new Error(`Cannot delete items: ${missingIds.join(', ')} - they do not belong to order ${order_no}`);
+        }
+      }
+
       const deleteSql = `
         DELETE FROM orders 
         WHERE id = ANY($1::int[]) 
@@ -797,20 +806,35 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
 
     // Handle updates
     if (itemsToUpdate.length > 0) {
-      // Add total_amount_without_tax to allowed fields
       const allowedFields = [
         "status", "disc_percentage", "disc_amount", "spl_disc_percentage", 
         "spl_disc_amount", "net_rate", "gross_amount", "total_quantity", 
         "total_amount", "total_amount_without_tax", "remarks", "quantity", 
         "delivery_date", "delivery_mode", "transporter_name", 
         "total_sgst_amount", "total_cgst_amount", "total_igst_amount", 
-        "sgst", "cgst", "igst", "gst", "hsn", "rate", "amount", "uom"
+        "sgst", "cgst", "igst", "gst", "hsn", "rate", "amount", "uom",
+        "item_code", "item_name", "order_date"
       ];
 
       for (const [index, update] of itemsToUpdate.entries()) {
-        const { id, _deleted, ...fields } = update; // Remove _deleted flag
+        const { id, _deleted, ...fields } = update;
 
-        // Filter fields to only allowed ones
+        // Validate this item belongs to the order
+        if (orderExists) {
+          const itemCheck = await client.query(
+            'SELECT order_no FROM orders WHERE id = $1',
+            [id]
+          );
+          
+          if (itemCheck.rows.length === 0) {
+            throw new Error(`Item with ID ${id} does not exist`);
+          }
+          
+          if (itemCheck.rows[0].order_no !== order_no) {
+            throw new Error(`Item ${id} belongs to order ${itemCheck.rows[0].order_no}, not ${order_no}`);
+          }
+        }
+
         const filteredFields = {};
         for (const key of Object.keys(fields)) {
           if (allowedFields.includes(key)) {
@@ -823,31 +847,23 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
           continue;
         }
 
-        // Build dynamic SET clause
         const setClause = Object.keys(filteredFields)
           .map((field, idx) => `${field} = $${idx + 1}`)
           .join(", ");
 
         const values = Object.values(filteredFields);
-        // Add ID as the last parameter
         values.push(id);
-        // Add order_no as second condition for safety
         values.push(order_no);
 
-        // IMPORTANT: Update only where both ID matches AND order_no matches
         const sql = `
           UPDATE orders 
           SET ${setClause} 
           WHERE id = $${values.length - 1} 
           AND order_no = $${values.length}`;
-
-        console.log(`🔄 Updating order item ${id} in order ${order_no}:`);
-        console.log(`   SET Clause includes: ${Object.keys(filteredFields).join(', ')}`);
         
         const result = await client.query(sql, values);
         
         if (result.rowCount === 0) {
-          console.error(`❌ No record found for id ${id} in order ${order_no}`);
           throw new Error(`No record found for id ${id} in order ${order_no}`);
         }
         
@@ -855,29 +871,162 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
       }
     }
 
+    // Handle insertions (new rows)
+    if (itemsToInsert.length > 0) {
+      console.log(`➕ Inserting ${itemsToInsert.length} new items into order ${order_no}`);
+      
+      // Prepare batch insert data
+      const insertData = [];
+      
+      for (const newItem of itemsToInsert) {
+        // Don't include id for new items
+        const { id, _deleted, ...cleanNewItem } = newItem;
+        
+        const insertItem = {
+          order_no: order_no,
+          voucher_type: commonOrderDetails.voucher_type,
+          order_date: commonOrderDetails.order_date,
+          customer_code: commonOrderDetails.customer_code,
+          customer_name: commonOrderDetails.customer_name,
+          executive: commonOrderDetails.executive,
+          role: commonOrderDetails.role,
+          status: commonOrderDetails.status,
+          item_code: cleanNewItem.item_code || '',
+          item_name: cleanNewItem.item_name || '',
+          hsn: cleanNewItem.hsn || '',
+          gst: cleanNewItem.gst || 0,
+          sgst: cleanNewItem.sgst || 0,
+          cgst: cleanNewItem.cgst || 0,
+          igst: cleanNewItem.igst || 0,
+          delivery_date: cleanNewItem.delivery_date || null,
+          delivery_mode: cleanNewItem.delivery_mode || '',
+          quantity: cleanNewItem.quantity || 0,
+          uom: cleanNewItem.uom || '',
+          rate: cleanNewItem.rate || 0,
+          amount: cleanNewItem.amount || 0,
+          net_rate: cleanNewItem.net_rate || 0,
+          gross_amount: cleanNewItem.gross_amount || 0,
+          disc_percentage: cleanNewItem.disc_percentage || 0,
+          disc_amount: cleanNewItem.disc_amount || 0,
+          spl_disc_percentage: cleanNewItem.spl_disc_percentage || 0,
+          spl_disc_amount: cleanNewItem.spl_disc_amount || 0,
+          total_quantity: commonOrderDetails.total_quantity,
+          total_amount: commonOrderDetails.total_amount,
+          total_amount_without_tax: commonOrderDetails.total_amount_without_tax,
+          total_sgst_amount: commonOrderDetails.total_sgst_amount,
+          total_cgst_amount: commonOrderDetails.total_cgst_amount,
+          total_igst_amount: commonOrderDetails.total_igst_amount,
+          remarks: commonOrderDetails.remarks,
+          transporter_name: cleanNewItem.transporter_name || '',
+        };
+        
+        insertData.push(insertItem);
+      }
+
+      // Insert items one by one (for better error tracking)
+      const insertedIds = [];
+      for (const [index, insertItem] of insertData.entries()) {
+        try {
+          const insertFields = Object.keys(insertItem);
+          const insertValues = Object.values(insertItem);
+          const placeholders = insertFields.map((_, idx) => `$${idx + 1}`).join(', ');
+          
+          const insertSql = `
+            INSERT INTO orders (${insertFields.join(', ')})
+            VALUES (${placeholders})
+            RETURNING id, item_name`;
+
+          const result = await client.query(insertSql, insertValues);
+          insertedIds.push(result.rows[0].id);
+          console.log(`✅ Inserted new item: ${result.rows[0].item_name} (ID: ${result.rows[0].id})`);
+        } catch (insertError) {
+          console.error(`❌ Failed to insert item ${index}:`, insertError);
+          throw new Error(`Failed to insert new item at index ${index}: ${insertError.message}`);
+        }
+      }
+    }
+
+    // Update common order details on ALL rows (only if there are existing rows)
+    if (orderExists || itemsToInsert.length > 0) {
+      const updateCommonSql = `
+        UPDATE orders 
+        SET 
+          voucher_type = $1,
+          order_date = $2,
+          customer_code = $3,
+          customer_name = $4,
+          executive = $5,
+          role = $6,
+          status = $7,
+          total_quantity = $8,
+          total_amount = $9,
+          total_amount_without_tax = $10,
+          total_sgst_amount = $11,
+          total_cgst_amount = $12,
+          total_igst_amount = $13,
+          remarks = $14
+        WHERE order_no = $15`;
+
+      const commonValues = [
+        commonOrderDetails.voucher_type,
+        commonOrderDetails.order_date,
+        commonOrderDetails.customer_code,
+        commonOrderDetails.customer_name,
+        commonOrderDetails.executive,
+        commonOrderDetails.role,
+        commonOrderDetails.status,
+        commonOrderDetails.total_quantity,
+        commonOrderDetails.total_amount,
+        commonOrderDetails.total_amount_without_tax,
+        commonOrderDetails.total_sgst_amount,
+        commonOrderDetails.total_cgst_amount,
+        commonOrderDetails.total_igst_amount,
+        commonOrderDetails.remarks,
+        order_no
+      ];
+
+      const updateResult = await client.query(updateCommonSql, commonValues);
+      console.log(`📊 Updated common order details for ${updateResult.rowCount} rows in order ${order_no}`);
+    }
+
     await client.query('COMMIT');
     
-    // Fetch updated records to return
-    const fetchUpdatedSql = `
-      SELECT * FROM orders 
-      WHERE order_no = $1 
-      ORDER BY id`;
-    
-    const updatedResult = await client.query(fetchUpdatedSql, [order_no]);
-    
+    // Get the updated order data to return
+    const finalResult = await client.query(
+      'SELECT * FROM orders WHERE order_no = $1 ORDER BY id',
+      [order_no]
+    );
+
+    console.log(`✅ Successfully processed order ${order_no}`);
+    console.log(`   Total rows in order: ${finalResult.rows.length}`);
+
     res.json({
-      message: "Orders processed successfully",
-      updatedCount: itemsToUpdate.length,
-      deletedCount: itemsToDelete.length,
-      data: updatedResult.rows
+      success: true,
+      message: `Order ${order_no} updated successfully`,
+      data: finalResult.rows,
+      operations: {
+        inserted: itemsToInsert.length,
+        updated: itemsToUpdate.length,
+        deleted: itemsToDelete.length,
+        total: finalResult.rows.length
+      },
+      order_details: {
+        order_no: order_no,
+        customer_name: commonOrderDetails.customer_name,
+        total_amount: commonOrderDetails.total_amount,
+        status: commonOrderDetails.status
+      }
     });
-    
-  } catch (err) {
+
+  } catch (error) {
     await client.query('ROLLBACK');
-    console.error("❌ Transaction failed:", err.message);
-    res.status(400).json({
-      error: "Update failed",
-      details: err.message,
+    console.error('❌ Transaction failed for order:', order_no, error);
+    res.status(500).json({
+      success: false,
+      error: 'Database operation failed',
+      message: error.message,
+      order_no: order_no,
+      timestamp: new Date().toISOString()
     });
   } finally {
     client.release();
