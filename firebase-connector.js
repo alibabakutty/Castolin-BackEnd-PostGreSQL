@@ -43,7 +43,6 @@ const corsOptions = {
 // Apply CORS middleware
 app.use(cors(corsOptions));
 app.use(express.json());
-
 // ✅ POSTGRES CONFIGURATION FOR RAILWAY
 const pool = new pkg.Pool({
   host: process.env.PGHOST || "localhost",
@@ -1032,7 +1031,6 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
     client.release();
   }
 });
-
 // ✅ USE PORT FROM ENVIRONMENT VARIABLE (RAILWAY PROVIDES THIS)
 const PORT = process.env.PORT || 5000;
 
